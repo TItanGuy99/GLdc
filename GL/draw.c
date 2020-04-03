@@ -1219,7 +1219,7 @@ GL_FORCE_INLINE void push(PVRHeader* header, GLboolean multiTextureHeader, PolyL
     */
 }
 
-#define DEBUG_CLIPPING 1
+#define DEBUG_CLIPPING 0
 
 GL_FORCE_INLINE void submitVertices(GLenum mode, GLsizei first, GLuint count, GLenum type, const GLvoid* indices) {
     TRACE();

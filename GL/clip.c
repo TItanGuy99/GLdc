@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
+#include <stdbool.h>
+#include <stdlib.h>
 
 #ifdef _arch_dreamcast
 #include <dc/pvr.h>
@@ -87,11 +89,7 @@ typedef struct {
     uint8_t visible;
 } Triangle;
 
-void _glClipTriangle(const Triangle* triangle, const uint8_t visible, SubmissionTarget* target, const uint8_t flatShade) __attribute__((optimize("fast-math")));
 void _glClipTriangle(const Triangle* triangle, const uint8_t visible, SubmissionTarget* target, const uint8_t flatShade) {
-    uint8_t i, c = 0;
-
-    uint8_t lastVisible = 255;
     Vertex* last = NULL;
     VertexExtra* veLast = NULL;
 
@@ -103,89 +101,79 @@ void _glClipTriangle(const Triangle* triangle, const uint8_t visible, Submission
     /* Used when flat shading is enabled */
     uint32_t finalColour = *((uint32_t*) bgra);
 
-    for(i = 0; i < 4; ++i) {
-        uint8_t thisIndex = (i == 3) ? 0 : i;
+    Vertex tmp;
+    VertexExtra veTmp;
 
-        Vertex next;
-        VertexExtra veNext;
+    uint8_t pushedCount = 0;
 
-        next.flags = VERTEX_CMD;
+#define IS_VISIBLE(x) (visible & (1 << (2 - (x)))) > 0
 
-        uint8_t thisVisible = (visible & (1 << (2 - thisIndex))) > 0;
-        if(i > 0) {
-            uint8_t lastIndex = (i == 3) ? 2 : thisIndex - 1;
+#define PUSH_VERT(vert, ve) \
+    last = aligned_vector_push_back(&target->output->vector, vert, 1); \
+    last->flags = VERTEX_CMD; \
+    veLast = aligned_vector_push_back(target->extras, ve, 1); \
+    ++pushedCount;
 
-            if(lastVisible != thisVisible) {
-                const Vertex* v1 = &vertices[lastIndex];
-                const Vertex* v2 = &vertices[thisIndex];
+#define CLIP_TO_PLANE(vert1, ve1, vert2, ve2) \
+    do { \
+        float t = _glClipLineToNearZ((vert1), (vert2), &tmp); \
+        interpolateFloat((vert1)->w, (vert2)->w, t, &tmp.w); \
+        interpolateVec2((vert1)->uv, (vert2)->uv, t, tmp.uv); \
+        interpolateVec3((ve1)->nxyz, (ve2)->nxyz, t, veTmp.nxyz); \
+        interpolateVec2((ve1)->st, (ve2)->st, t, veTmp.st); \
+        if(flatShade) { \
+            interpolateColour((const uint8_t*) &finalColour, (const uint8_t*) &finalColour, t, tmp.bgra); \
+        } else { interpolateColour((vert1)->bgra, (vert2)->bgra, t, tmp.bgra); } \
+    } while(0); \
 
-                const VertexExtra* ve1 = &extras[lastIndex];
-                const VertexExtra* ve2 = &extras[thisIndex];
-
-                float t = _glClipLineToNearZ(v1, v2, &next);
-
-                interpolateFloat(v1->w, v2->w, t, &next.w);
-                interpolateVec2(v1->uv, v2->uv, t, next.uv);
-
-                interpolateVec3(ve1->nxyz, ve2->nxyz, t, veNext.nxyz);
-                interpolateVec2(ve1->st, ve2->st, t, veNext.st);
-
-                if(flatShade) {
-                    char* next_bgra = (char*) next.bgra;
-                    *((uint32_t*) next_bgra) = finalColour;
-                } else {
-                    interpolateColour(v1->bgra, v2->bgra, t, next.bgra);
-                }
-
-                /* Push back the new vertices to the end of both the ClipVertex and VertexExtra lists */
-                last = aligned_vector_push_back(&target->output->vector, &next, 1);
-                last->flags = VERTEX_CMD;
-
-                veLast = aligned_vector_push_back(target->extras, &veNext, 1);
-
-                ++c;
-            }
-        }
-
-        if(thisVisible && i != 3) {
-            last = aligned_vector_push_back(&target->output->vector, &vertices[thisIndex], 1);
-            last->flags = VERTEX_CMD;
-
-            veLast = aligned_vector_push_back(target->extras, &extras[thisIndex], 1);
-
-            ++c;
-        }
-
-        lastVisible = thisVisible;
+    uint8_t v0 = IS_VISIBLE(0);
+    uint8_t v1 = IS_VISIBLE(1);
+    uint8_t v2 = IS_VISIBLE(2);
+    if(v0) {
+        PUSH_VERT(&vertices[0], &extras[0]);
     }
 
-    if(last) {
-        if(c == 4) {
-            /* Convert to two triangles */
-            Vertex newVerts[3];
-            newVerts[0] = *(last - 3);
-            newVerts[1] = *(last - 1);
-            newVerts[2] = *(last);
+    if(v0 != v1) {
+        CLIP_TO_PLANE(&vertices[0], &extras[0], &vertices[1], &extras[1]);
+        PUSH_VERT(&tmp, &veTmp);
+    }
 
-            VertexExtra newExtras[3];
-            newExtras[0] = *(veLast - 3);
-            newExtras[1] = *(veLast - 1);
-            newExtras[2] = *(veLast);
+    if(v1) {
+        PUSH_VERT(&vertices[1], &extras[1]);
+    }
 
-            (last - 1)->flags = VERTEX_CMD_EOL;
-            newVerts[0].flags = VERTEX_CMD;
-            newVerts[1].flags = VERTEX_CMD;
-            newVerts[2].flags = VERTEX_CMD_EOL;
+    if(v1 != v2) {
+        CLIP_TO_PLANE(&vertices[1], &extras[1], &vertices[2], &extras[2]);
+        PUSH_VERT(&tmp, &veTmp);
+    }
 
-            aligned_vector_resize(&target->output->vector, target->output->vector.size - 1);
-            aligned_vector_push_back(&target->output->vector, newVerts, 3);
+    if(v2) {
+        PUSH_VERT(&vertices[2], &extras[2]);
+    }
 
-            aligned_vector_resize(target->extras, target->extras->size - 1);
-            aligned_vector_push_back(target->extras, newExtras, 3);
-        } else {
-            last->flags = VERTEX_CMD_EOL;
-        }
+    if(v2 != v0) {
+        CLIP_TO_PLANE(&vertices[2], &extras[2], &vertices[0], &extras[0]);
+        PUSH_VERT(&tmp, &veTmp);
+    }
 
+    if(pushedCount == 4) {
+        Vertex* prev = last - 1;
+        VertexExtra* prevVe = veLast - 1;
+
+        tmp = *prev;
+        veTmp = *prevVe;
+
+        *prev = *last;
+        *prevVe = *veLast;
+
+        *last = tmp;
+        *veLast = veTmp;
+
+        prev->flags = VERTEX_CMD;
+        last->flags = VERTEX_CMD_EOL;
+    } else {
+        /* Set the last flag to the end of the new strip */
+        last->flags = VERTEX_CMD_EOL;
     }
 }
 
